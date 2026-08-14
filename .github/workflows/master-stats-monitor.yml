@@ -1,0 +1,180 @@
+name: MASTER Stats Monitor 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: master-stats-monitor
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUNBUFFERED: '1'
+
+    steps:
+      - name: Checkout runtime
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Require API key
+        shell: bash
+        run: |
+          if [ -z "${API_FOOTBALL_KEY:-}" ]; then
+            echo "Missing repository secret API_FOOTBALL_KEY"
+            exit 2
+          fi
+
+      - name: Restore latest cumulative monitor state
+        id: restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          artifact_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.expired == false and (.name | startswith("master-monitor-state-")))] | sort_by(.created_at) | reverse | .[0].id // empty')
+          if [ -n "$artifact_id" ]; then
+            echo "Restoring artifact id=$artifact_id"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > /tmp/master-monitor-state.zip
+            mkdir -p /tmp/master-monitor-state
+            unzip -q /tmp/master-monitor-state.zip -d /tmp/master-monitor-state
+            tar -xzf /tmp/master-monitor-state/state.tgz -C .
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No previous monitor state found; starting a fresh leakage-safe monitor DB."
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide catalog refresh
+        id: catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          previous=""
+          if [ -f data/.last_catalog_refresh ]; then previous=$(cat data/.last_catalog_refresh); fi
+          if [ ! -f data/master_monitor.db ] || [ "$previous" != "$today" ]; then
+            echo "refresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "refresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run daily fixture-catalog bootstrap + monitor cycle
+        if: steps.catalog.outputs.refresh == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python scripts/run_stats_monitor.py \
+            --db data/master_monitor.db \
+            --raw-dir data/raw/stats_monitor \
+            --bootstrap-defaults \
+            --max-fixtures 12 \
+            --prematch-min 150 \
+            --post-delay-min 105 \
+            --lookback-hours 18
+          date -u +%F > data/.last_catalog_refresh
+
+      - name: Run hourly monitor cycle
+        if: steps.catalog.outputs.refresh != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python scripts/run_stats_monitor.py \
+            --db data/master_monitor.db \
+            --raw-dir data/raw/stats_monitor \
+            --max-fixtures 12 \
+            --prematch-min 150 \
+            --post-delay-min 105 \
+            --lookback-hours 18
+
+      - name: Validate state and write summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python - <<'PY'
+          import json
+          from master_data.db import init_db
+          from master_data.stats_monitor import status_report
+          con = init_db('data/master_monitor.db')
+          report = status_report(con)
+          print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+          with open('data/monitor_status.json', 'w', encoding='utf-8') as f:
+              json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+          PY
+          test -s data/master_monitor.db
+
+      - name: Pack cumulative monitor state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/raw/stats_monitor
+          tar -czf state.tgz \
+            data/master_monitor.db \
+            data/.last_catalog_refresh \
+            data/monitor_status.json \
+            data/raw/stats_monitor
+
+      - name: Upload cumulative state
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-monitor-state-${{ github.run_id }}
+          path: state.tgz
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+
+
+      - name: Daily repository heartbeat and visible status
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          mkdir -p monitor
+          previous=""
+          if [ -f monitor/heartbeat_date.txt ]; then previous=$(cat monitor/heartbeat_date.txt); fi
+          if [ "$previous" != "$today" ]; then
+            cp data/monitor_status.json monitor/last_success.json
+            printf '%s\n' "$today" > monitor/heartbeat_date.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add monitor/last_success.json monitor/heartbeat_date.txt
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: stats monitor heartbeat ${today}"
+              git push
+            fi
+          fi
+
+      - name: Remove older state artifacts
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_id='${{ steps.upload.outputs.artifact-id }}'
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false and (.name | startswith("master-monitor-state-"))) | .id' \
+            | while read -r id; do
+                if [ -n "$id" ] && [ "$id" != "$current_id" ]; then
+                  echo "Deleting old state artifact $id"
+                  gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" || true
+                fi
+              done
