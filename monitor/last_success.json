@@ -1,0 +1,18 @@
+{
+  "api_football_linked_fixtures": 0,
+  "future_or_recent_api_fixtures": 0,
+  "team_stat_snapshots": 0,
+  "player_stat_snapshots": 0,
+  "finalized_fixtures": 0,
+  "active_watchlist": 0,
+  "canonical_player_match_rows": 0,
+  "quota": {
+    "provider_key": "API_FOOTBALL",
+    "period_key": "2026-08-14",
+    "limit": 100,
+    "reserve": 15,
+    "used": 0,
+    "remaining": 100,
+    "spendable": 85
+  }
+}
