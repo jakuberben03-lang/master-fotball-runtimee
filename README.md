@@ -1,46 +1,34 @@
-# MASTER Football — Stats Monitor 24/7 runtime
+# MASTER Football — FREE Multi-Provider Stats Monitor 24/7
 
-Canonical basis: MASTER Football v2.4.2 / Data + Market Engine v2.4 / Stats Monitor v1.0.
+Canonical basis: MASTER Football v2.4.2 / Data + Market Engine v2.4 / Stats Monitor v1.0 safety contract.
+Patch runtime: **FREE MULTI-PROVIDER v1**.
 
-## What this repository does
+## Why this patch exists
+API-Football Free returned a provider-plan block for season 2026. The scheduler worked, but 2026 catalogs were empty. This patch therefore makes current collection independent of a paid API-Football plan.
 
-- Runs the canonical Stats Monitor every hour with GitHub Actions.
-- Refreshes the current Big-5 + Czech top flight + UEFA fixture catalog once per UTC day.
-- Collects leakage-safe PRE-MATCH and POST-MATCH snapshots.
-- Keeps LIVE collection off by default to protect free API quota.
-- Persists the cumulative SQLite DB + raw provider responses between ephemeral GitHub runners using one rolling Actions artifact.
-- Deletes older state artifacts after a successful new upload so storage does not grow by one full DB every hour.
+## Current free stack
 
-## Required one-time setup
-
-1. Upload this folder to the repository root.
-2. GitHub → Settings → Secrets and variables → Actions → New repository secret.
-3. Name: `API_FOOTBALL_KEY`.
-4. Value: your API-Football key.
-5. GitHub → Actions → `MASTER Stats Monitor 24/7` → Run workflow.
-
-After the first successful run, the scheduled trigger runs at minute 17 of every hour (UTC).
-
-## Persistence design
-
-GitHub-hosted runners are disposable. The workflow therefore restores the newest `master-monitor-state-*` artifact before collection, then uploads a new cumulative `state.tgz`. It contains:
-
-- `data/master_monitor.db`
-- `data/raw/stats_monitor/`
-- `data/monitor_status.json`
-- `data/.last_catalog_refresh`
-
-The repository intentionally does **not** include the 225MB historical canonical DB. This runtime is dedicated to current-season collection. The monitor DB can later be merged/audited against the canonical MASTER DB using the normal Data Engine workflow.
+- **OpenFootball current schedules**: provider-native 2026/27 current catalogs where a verified current file exists (currently EPL, Bundesliga, La Liga, Serie A).
+- **Football-Data.co.uk public fixture files**: timestamped by MASTER at actual fetch time; stores current fixture observations and bookmaker odds observations.
+- **TheSportsDB free v1 (`123`)**: small-window enrichment only after exact date + declared-alias team verification; can collect lineups and team event statistics when available.
+- **API-Football**: optional fallback only; `API_FOOTBALL_KEY` is no longer required for the FREE monitor.
 
 ## Safety
 
-- API key is only read from `API_FOOTBALL_KEY`.
-- No fuzzy fixture merge.
-- PRE/LIVE/POST timing firewall remains intact.
-- LIVE collection remains OFF by default.
-- Stats history does not promote any model.
-- Current betting authority stays 8 PROVISIONAL / 12 NO MODEL / 0 ACTIVE.
+- no fuzzy fixture merge;
+- no fabricated historical `observed_at`;
+- DATE_ONLY schedule rows remain explicitly low precision;
+- lineup captured after kickoff is not backfilled as pre-match known;
+- TheSportsDB event stats are team-level and are **not** converted into fake player shots/fouls rows;
+- gaps are printed in `monitor/last_success.json`;
+- success requires at least one real current free-source catalog/observation;
+- stats collection does not change model status: **8 PROVISIONAL / 12 NO MODEL / 0 ACTIVE**.
 
-## Public-repository scheduler keepalive
+## Known coverage gaps in v1
 
-GitHub can disable scheduled workflows in public repositories after a long period with no repository activity. The workflow therefore writes one tiny successful-status heartbeat commit per UTC day (`monitor/last_success.json` + `monitor/heartbeat_date.txt`). It never commits the SQLite database, raw API payloads, or secrets.
+- full current Ligue 1 catalog is not yet verified from the chosen OpenFootball current path;
+- full current Czech top-flight catalog still needs a robust verified official/free ingest;
+- full UEFA 2026/27 current catalog is not yet available from the verified OpenFootball repository path;
+- current FREE enrichment does not provide complete player-match shots/SOT/fouls needed for Player Engine training.
+
+Those are explicit gaps, not silent SUCCESS claims.
